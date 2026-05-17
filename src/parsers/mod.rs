@@ -2,6 +2,8 @@ pub mod ll1;
 pub mod recursive_descent;
 pub mod lr0;
 pub mod slr1;
+pub mod lr1;
+pub mod lalr1;
 
 #[cfg(test)]
 mod tests;

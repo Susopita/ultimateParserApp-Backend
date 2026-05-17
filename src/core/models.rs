@@ -43,24 +43,3 @@ pub struct LR0ParseSnapshot {
     pub action: String,
 }
 
-/// Structure for serializing automata to D3.js compatible JSON.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AutomatonJSON {
-    pub nodes: Vec<NodeJSON>,
-    pub links: Vec<LinkJSON>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NodeJSON {
-    pub id: String,
-    pub label: String,
-    #[serde(rename = "isFinal")]
-    pub is_final: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LinkJSON {
-    pub source: String,
-    pub target: String,
-    pub label: String,
-}

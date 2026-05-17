@@ -113,6 +113,46 @@ fn tokenize_input(input: &str, grammar: &crate::core::models::Grammar) -> Vec<St
     tokens
 }
 
+/// Handler to execute Recursive Descent parsing simulation
+pub async fn parse_rd(Json(payload): Json<ParseRequest>) -> impl IntoResponse {
+    let grammar = match Grammar::from_string(&payload.raw_grammar) {
+        Ok(g) => g,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(ParseResponse {
+            status: "error".to_string(),
+            snapshots: None,
+            parsing_table: None,
+            message: Some(format!("Grammar Error: {}", e)),
+        })),
+    };
+
+    let parser = match crate::parsers::recursive_descent::RecursiveDescentParser::new(grammar.clone()) {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(ParseResponse {
+            status: "error".to_string(),
+            snapshots: None,
+            parsing_table: None,
+            message: Some(format!("Parser Error: {}", e)),
+        })),
+    };
+
+    let tokens = tokenize_input(&payload.input_string, &grammar);
+
+    match parser.parse_input(tokens) {
+        Ok(snapshots) => (StatusCode::OK, Json(ParseResponse {
+            status: "success".to_string(),
+            snapshots: Some(snapshots),
+            parsing_table: None,
+            message: None,
+        })),
+        Err(e) => (StatusCode::OK, Json(ParseResponse {
+            status: "error".to_string(),
+            snapshots: None,
+            parsing_table: None,
+            message: Some(e),
+        })),
+    }
+}
+
 /// Handler to execute LL(1) parsing simulation
 pub async fn parse_ll1(Json(payload): Json<ParseRequest>) -> impl IntoResponse {
     let grammar = match Grammar::from_string(&payload.raw_grammar) {
@@ -212,6 +252,47 @@ pub struct LR0ParseResponse {
 }
 
 pub type SLR1ParseResponse = LR0ParseResponse;
+pub type LR1ParseResponse = LR0ParseResponse;
+pub type LALR1ParseResponse = LR0ParseResponse;
+
+type TableMap = std::collections::HashMap<String, std::collections::HashMap<String, String>>;
+
+fn build_automaton_response(
+    state_items: Vec<Vec<String>>,
+    state_accept: Vec<bool>,
+    transitions: &std::collections::HashMap<(usize, String), usize>,
+) -> LR0AutomatonResponse {
+    let states = state_items
+        .into_iter()
+        .zip(state_accept)
+        .enumerate()
+        .map(|(id, (items, is_accept))| LR0AutomatonStateResponse { id, items, is_accept })
+        .collect();
+    let transitions = transitions
+        .iter()
+        .map(|((from, sym), to)| LR0TransitionResponse { from: *from, to: *to, symbol: sym.clone() })
+        .collect();
+    LR0AutomatonResponse { states, transitions }
+}
+
+fn serialize_action_table<A>(
+    table: &std::collections::HashMap<(usize, String), A>,
+    display: impl Fn(&A) -> String,
+) -> TableMap {
+    let mut map = TableMap::new();
+    for ((state, terminal), action) in table {
+        map.entry(state.to_string()).or_default().insert(terminal.clone(), display(action));
+    }
+    map
+}
+
+fn serialize_goto_table(table: &std::collections::HashMap<(usize, String), usize>) -> TableMap {
+    let mut map = TableMap::new();
+    for ((state, nt), target) in table {
+        map.entry(state.to_string()).or_default().insert(nt.clone(), target.to_string());
+    }
+    map
+}
 
 /// Handler to execute LR(0) parsing simulation
 pub async fn parse_lr0(Json(payload): Json<ParseRequest>) -> impl IntoResponse {
@@ -243,44 +324,15 @@ pub async fn parse_lr0(Json(payload): Json<ParseRequest>) -> impl IntoResponse {
         })),
     };
 
-    // Build automaton response
-    let automaton = {
-        let states: Vec<LR0AutomatonStateResponse> = parser.states.iter().enumerate().map(|(id, items)| {
-            let item_strings: Vec<String> = items.iter().map(|item| item.to_display_string()).collect();
-            let is_accept = items.iter().any(|item| {
-                item.is_complete() && item.production.left == parser.augmented_grammar.start_symbol
-            });
-            LR0AutomatonStateResponse { id, items: item_strings, is_accept }
-        }).collect();
-
-        let transitions: Vec<LR0TransitionResponse> = parser.transitions.iter().map(|((from, sym), to)| {
-            LR0TransitionResponse { from: *from, to: *to, symbol: sym.clone() }
-        }).collect();
-
-        LR0AutomatonResponse { states, transitions }
-    };
-
-    // Build serializable ACTION table: state_id_str -> terminal -> action_str
-    let mut action_map: std::collections::HashMap<String, std::collections::HashMap<String, String>> = std::collections::HashMap::new();
-    for ((state_id, terminal), action) in &parser.action_table {
-        action_map
-            .entry(state_id.to_string())
-            .or_default()
-            .insert(terminal.clone(), action.to_display_string());
-    }
-
-    // Build serializable GOTO table: state_id_str -> non_terminal -> target_state_str
-    let mut goto_map: std::collections::HashMap<String, std::collections::HashMap<String, String>> = std::collections::HashMap::new();
-    for ((state_id, nt), target) in &parser.goto_table {
-        goto_map
-            .entry(state_id.to_string())
-            .or_default()
-            .insert(nt.clone(), target.to_string());
-    }
-
+    let automaton = build_automaton_response(
+        parser.states.iter().map(|items| items.iter().map(|i| i.to_display_string()).collect()).collect(),
+        parser.states.iter().map(|items| items.iter().any(|i| i.is_complete() && i.production.left == parser.augmented_grammar.start_symbol)).collect(),
+        &parser.transitions,
+    );
+    let action_map = serialize_action_table(&parser.action_table, |a| a.to_display_string());
+    let goto_map = serialize_goto_table(&parser.goto_table);
     let tokens = tokenize_input(&payload.input_string, &grammar);
 
-    // Run the parsing simulation
     match parser.parse_input(tokens) {
         Ok(snapshots) => {
             (StatusCode::OK, Json(LR0ParseResponse {
@@ -296,6 +348,140 @@ pub async fn parse_lr0(Json(payload): Json<ParseRequest>) -> impl IntoResponse {
         }
         Err(e) => {
             (StatusCode::OK, Json(LR0ParseResponse {
+                status: "error".to_string(),
+                automaton: Some(automaton),
+                action_table: Some(action_map),
+                goto_table: Some(goto_map),
+                terminals: Some(parser.get_all_terminals()),
+                non_terminals: Some(parser.get_all_non_terminals()),
+                snapshots: None,
+                message: Some(e),
+            }))
+        }
+    }
+}
+
+/// Handler to execute LR(1) parsing simulation
+pub async fn parse_lr1(Json(payload): Json<ParseRequest>) -> impl IntoResponse {
+    let grammar = match Grammar::from_string(&payload.raw_grammar) {
+        Ok(g) => g,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(LR1ParseResponse {
+            status: "error".to_string(),
+            automaton: None,
+            action_table: None,
+            goto_table: None,
+            terminals: None,
+            non_terminals: None,
+            snapshots: None,
+            message: Some(format!("Grammar Error: {}", e)),
+        })),
+    };
+
+    let parser = match crate::parsers::lr1::LR1Parser::new(grammar.clone()) {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(LR1ParseResponse {
+            status: "error".to_string(),
+            automaton: None,
+            action_table: None,
+            goto_table: None,
+            terminals: None,
+            non_terminals: None,
+            snapshots: None,
+            message: Some(format!("LR(1) Table Error: {}", e)),
+        })),
+    };
+
+    let automaton = build_automaton_response(
+        parser.states.iter().map(|items| items.iter().map(|i| i.to_display_string()).collect()).collect(),
+        parser.states.iter().map(|items| items.iter().any(|i| i.is_complete() && i.production.left == parser.augmented_grammar.start_symbol)).collect(),
+        &parser.transitions,
+    );
+    let action_map = serialize_action_table(&parser.action_table, |a| a.to_display_string());
+    let goto_map = serialize_goto_table(&parser.goto_table);
+    let tokens = tokenize_input(&payload.input_string, &grammar);
+
+    match parser.parse_input(tokens) {
+        Ok(snapshots) => {
+            (StatusCode::OK, Json(LR1ParseResponse {
+                status: "success".to_string(),
+                automaton: Some(automaton),
+                action_table: Some(action_map),
+                goto_table: Some(goto_map),
+                terminals: Some(parser.get_all_terminals()),
+                non_terminals: Some(parser.get_all_non_terminals()),
+                snapshots: Some(snapshots),
+                message: None,
+            }))
+        }
+        Err(e) => {
+            (StatusCode::OK, Json(LR1ParseResponse {
+                status: "error".to_string(),
+                automaton: Some(automaton),
+                action_table: Some(action_map),
+                goto_table: Some(goto_map),
+                terminals: Some(parser.get_all_terminals()),
+                non_terminals: Some(parser.get_all_non_terminals()),
+                snapshots: None,
+                message: Some(e),
+            }))
+        }
+    }
+}
+
+/// Handler to execute LALR(1) parsing simulation
+pub async fn parse_lalr1(Json(payload): Json<ParseRequest>) -> impl IntoResponse {
+    let grammar = match Grammar::from_string(&payload.raw_grammar) {
+        Ok(g) => g,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(LALR1ParseResponse {
+            status: "error".to_string(),
+            automaton: None,
+            action_table: None,
+            goto_table: None,
+            terminals: None,
+            non_terminals: None,
+            snapshots: None,
+            message: Some(format!("Grammar Error: {}", e)),
+        })),
+    };
+
+    let parser = match crate::parsers::lalr1::LALR1Parser::new(grammar.clone()) {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(LALR1ParseResponse {
+            status: "error".to_string(),
+            automaton: None,
+            action_table: None,
+            goto_table: None,
+            terminals: None,
+            non_terminals: None,
+            snapshots: None,
+            message: Some(format!("LALR(1) Table Error: {}", e)),
+        })),
+    };
+
+    let automaton = build_automaton_response(
+        parser.states.iter().map(|items| items.iter().map(|i| i.to_display_string()).collect()).collect(),
+        parser.states.iter().map(|items| items.iter().any(|i| i.is_complete() && i.production.left == parser.augmented_grammar.start_symbol)).collect(),
+        &parser.transitions,
+    );
+    let action_map = serialize_action_table(&parser.action_table, |a| a.to_display_string());
+    let goto_map = serialize_goto_table(&parser.goto_table);
+    let tokens = tokenize_input(&payload.input_string, &grammar);
+
+    match parser.parse_input(tokens) {
+        Ok(snapshots) => {
+            (StatusCode::OK, Json(LALR1ParseResponse {
+                status: "success".to_string(),
+                automaton: Some(automaton),
+                action_table: Some(action_map),
+                goto_table: Some(goto_map),
+                terminals: Some(parser.get_all_terminals()),
+                non_terminals: Some(parser.get_all_non_terminals()),
+                snapshots: Some(snapshots),
+                message: None,
+            }))
+        }
+        Err(e) => {
+            (StatusCode::OK, Json(LALR1ParseResponse {
                 status: "error".to_string(),
                 automaton: Some(automaton),
                 action_table: Some(action_map),
@@ -339,38 +525,13 @@ pub async fn parse_slr1(Json(payload): Json<ParseRequest>) -> impl IntoResponse 
         })),
     };
 
-    let automaton = {
-        let states: Vec<LR0AutomatonStateResponse> = parser.states.iter().enumerate().map(|(id, items)| {
-            let item_strings: Vec<String> = items.iter().map(|item| item.to_display_string()).collect();
-            let is_accept = items.iter().any(|item| {
-                item.is_complete() && item.production.left == parser.augmented_grammar.start_symbol
-            });
-            LR0AutomatonStateResponse { id, items: item_strings, is_accept }
-        }).collect();
-
-        let transitions: Vec<LR0TransitionResponse> = parser.transitions.iter().map(|((from, sym), to)| {
-            LR0TransitionResponse { from: *from, to: *to, symbol: sym.clone() }
-        }).collect();
-
-        LR0AutomatonResponse { states, transitions }
-    };
-
-    let mut action_map: std::collections::HashMap<String, std::collections::HashMap<String, String>> = std::collections::HashMap::new();
-    for ((state_id, terminal), action) in &parser.action_table {
-        action_map
-            .entry(state_id.to_string())
-            .or_default()
-            .insert(terminal.clone(), action.to_display_string());
-    }
-
-    let mut goto_map: std::collections::HashMap<String, std::collections::HashMap<String, String>> = std::collections::HashMap::new();
-    for ((state_id, nt), target) in &parser.goto_table {
-        goto_map
-            .entry(state_id.to_string())
-            .or_default()
-            .insert(nt.clone(), target.to_string());
-    }
-
+    let automaton = build_automaton_response(
+        parser.states.iter().map(|items| items.iter().map(|i| i.to_display_string()).collect()).collect(),
+        parser.states.iter().map(|items| items.iter().any(|i| i.is_complete() && i.production.left == parser.augmented_grammar.start_symbol)).collect(),
+        &parser.transitions,
+    );
+    let action_map = serialize_action_table(&parser.action_table, |a| a.to_display_string());
+    let goto_map = serialize_goto_table(&parser.goto_table);
     let tokens = tokenize_input(&payload.input_string, &grammar);
 
     match parser.parse_input(tokens) {

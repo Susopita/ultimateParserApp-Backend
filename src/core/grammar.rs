@@ -72,7 +72,7 @@ impl Grammar {
     fn parse_symbol(s: &str) -> Symbol {
         match s {
             "ϵ" | "ε" | "epsilon" => Symbol::Epsilon,
-            _ if s.chars().next().map_or(false, |c| c.is_uppercase()) => {
+            _ if s.chars().next().is_some_and(|c| c.is_uppercase()) => {
                 Symbol::NonTerminal(s.to_string())
             }
             _ => Symbol::Terminal(s.to_string()),
