@@ -23,7 +23,7 @@ pub struct Grammar {
     pub start_symbol: Symbol,
 }
 
-/// A snapshot of the parser state at a given step.
+/// A snapshot of the parser state at a given step (used by LL(1)).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParseSnapshot {
     pub step: usize,
@@ -32,24 +32,14 @@ pub struct ParseSnapshot {
     pub action: String,
 }
 
-/// Structure for serializing automata to D3.js compatible JSON.
+/// A snapshot of the LR(0) parser state at a given step.
+/// Uses separate state and symbol stacks for accurate representation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AutomatonJSON {
-    pub nodes: Vec<NodeJSON>,
-    pub links: Vec<LinkJSON>,
+pub struct LR0ParseSnapshot {
+    pub step: usize,
+    pub state_stack: Vec<usize>,
+    pub symbol_stack: Vec<String>,
+    pub input_remaining: Vec<String>,
+    pub action: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NodeJSON {
-    pub id: String,
-    pub label: String,
-    #[serde(rename = "isFinal")]
-    pub is_final: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LinkJSON {
-    pub source: String,
-    pub target: String,
-    pub label: String,
-}
