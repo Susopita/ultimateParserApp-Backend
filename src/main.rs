@@ -12,6 +12,7 @@ mod parsers;
 
 #[tokio::main]
 async fn main() {
+    dotenvy::dotenv().ok();
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
@@ -26,6 +27,7 @@ async fn main() {
         .route("/parse-slr1", post(api::parse_slr1))
         .route("/parse-lr1", post(api::parse_lr1))
         .route("/parse-lalr1", post(api::parse_lalr1))
+        .route("/ai-assist", post(api::ai_assist))
         .layer(cors);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
