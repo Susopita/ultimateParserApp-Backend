@@ -24,6 +24,7 @@ async fn main() {
         .route("/analyze-grammar", post(api::analyze_grammar))
         .route("/parse-ll1", post(api::parse_ll1))
         .route("/parse-lr0", post(api::parse_lr0))
+        .route("/parse-slr1", post(api::parse_slr1))
         .layer(cors);
 
     // Address to listen on

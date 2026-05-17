@@ -211,6 +211,8 @@ pub struct LR0ParseResponse {
     pub message: Option<String>,
 }
 
+pub type SLR1ParseResponse = LR0ParseResponse;
+
 /// Handler to execute LR(0) parsing simulation
 pub async fn parse_lr0(Json(payload): Json<ParseRequest>) -> impl IntoResponse {
     let grammar = match Grammar::from_string(&payload.raw_grammar) {
@@ -294,6 +296,98 @@ pub async fn parse_lr0(Json(payload): Json<ParseRequest>) -> impl IntoResponse {
         }
         Err(e) => {
             (StatusCode::OK, Json(LR0ParseResponse {
+                status: "error".to_string(),
+                automaton: Some(automaton),
+                action_table: Some(action_map),
+                goto_table: Some(goto_map),
+                terminals: Some(parser.get_all_terminals()),
+                non_terminals: Some(parser.get_all_non_terminals()),
+                snapshots: None,
+                message: Some(e),
+            }))
+        }
+    }
+}
+
+/// Handler to execute SLR(1) parsing simulation
+pub async fn parse_slr1(Json(payload): Json<ParseRequest>) -> impl IntoResponse {
+    let grammar = match Grammar::from_string(&payload.raw_grammar) {
+        Ok(g) => g,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(SLR1ParseResponse {
+            status: "error".to_string(),
+            automaton: None,
+            action_table: None,
+            goto_table: None,
+            terminals: None,
+            non_terminals: None,
+            snapshots: None,
+            message: Some(format!("Grammar Error: {}", e)),
+        })),
+    };
+
+    let parser = match crate::parsers::slr1::SLR1Parser::new(grammar.clone()) {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(SLR1ParseResponse {
+            status: "error".to_string(),
+            automaton: None,
+            action_table: None,
+            goto_table: None,
+            terminals: None,
+            non_terminals: None,
+            snapshots: None,
+            message: Some(format!("SLR(1) Table Error: {}", e)),
+        })),
+    };
+
+    let automaton = {
+        let states: Vec<LR0AutomatonStateResponse> = parser.states.iter().enumerate().map(|(id, items)| {
+            let item_strings: Vec<String> = items.iter().map(|item| item.to_display_string()).collect();
+            let is_accept = items.iter().any(|item| {
+                item.is_complete() && item.production.left == parser.augmented_grammar.start_symbol
+            });
+            LR0AutomatonStateResponse { id, items: item_strings, is_accept }
+        }).collect();
+
+        let transitions: Vec<LR0TransitionResponse> = parser.transitions.iter().map(|((from, sym), to)| {
+            LR0TransitionResponse { from: *from, to: *to, symbol: sym.clone() }
+        }).collect();
+
+        LR0AutomatonResponse { states, transitions }
+    };
+
+    let mut action_map: std::collections::HashMap<String, std::collections::HashMap<String, String>> = std::collections::HashMap::new();
+    for ((state_id, terminal), action) in &parser.action_table {
+        action_map
+            .entry(state_id.to_string())
+            .or_default()
+            .insert(terminal.clone(), action.to_display_string());
+    }
+
+    let mut goto_map: std::collections::HashMap<String, std::collections::HashMap<String, String>> = std::collections::HashMap::new();
+    for ((state_id, nt), target) in &parser.goto_table {
+        goto_map
+            .entry(state_id.to_string())
+            .or_default()
+            .insert(nt.clone(), target.to_string());
+    }
+
+    let tokens = tokenize_input(&payload.input_string, &grammar);
+
+    match parser.parse_input(tokens) {
+        Ok(snapshots) => {
+            (StatusCode::OK, Json(SLR1ParseResponse {
+                status: "success".to_string(),
+                automaton: Some(automaton),
+                action_table: Some(action_map),
+                goto_table: Some(goto_map),
+                terminals: Some(parser.get_all_terminals()),
+                non_terminals: Some(parser.get_all_non_terminals()),
+                snapshots: Some(snapshots),
+                message: None,
+            }))
+        }
+        Err(e) => {
+            (StatusCode::OK, Json(SLR1ParseResponse {
                 status: "error".to_string(),
                 automaton: Some(automaton),
                 action_table: Some(action_map),
