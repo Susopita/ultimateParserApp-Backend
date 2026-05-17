@@ -1,3 +1,6 @@
+mod ai;
+pub use ai::ai_assist;
+
 use axum::{Json, response::IntoResponse, http::StatusCode};
 use serde::{Deserialize, Serialize};
 use crate::core::{Grammar, Production, Symbol};
