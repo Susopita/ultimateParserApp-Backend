@@ -519,6 +519,90 @@ impl SLR1Parser {
         Ok(snapshots)
     }
 
+    pub fn parse_input_with_tree(&self, input: Vec<String>) -> Result<(Vec<LR0ParseSnapshot>, crate::core::models::ParseTreeNode), String> {
+        use crate::core::models::ParseTreeNode;
+        let mut input = input;
+        input.push("$".to_string());
+
+        let mut snapshots = Vec::new();
+        let mut state_stack: Vec<usize> = vec![0];
+        let mut symbol_stack: Vec<String> = Vec::new();
+        let mut node_stack: Vec<ParseTreeNode> = Vec::new();
+        let mut input_ptr = 0;
+        let mut step = 0;
+        let mut nid = 0usize;
+
+        loop {
+            let current_state = *state_stack.last().unwrap();
+            let current_input = input[input_ptr].clone();
+            let action = self.action_table.get(&(current_state, current_input.clone()));
+
+            snapshots.push(LR0ParseSnapshot {
+                step,
+                state_stack: state_stack.clone(),
+                symbol_stack: symbol_stack.clone(),
+                input_remaining: input[input_ptr..].to_vec(),
+                action: String::new(),
+            });
+
+            match action {
+                Some(LR0Action::Shift(next_state)) => {
+                    snapshots.last_mut().unwrap().action = format!("Shift '{}' → push state {}", current_input, next_state);
+                    node_stack.push(ParseTreeNode { id: nid, label: current_input.clone(), node_type: "terminal".to_string(), children: vec![] });
+                    nid += 1;
+                    symbol_stack.push(current_input);
+                    state_stack.push(*next_state);
+                    input_ptr += 1;
+                }
+                Some(LR0Action::Reduce(prod_idx, prod_str)) => {
+                    let production = &self.production_list[*prod_idx];
+                    let rhs_len = if production.right.len() == 1 && production.right[0] == Symbol::Epsilon { 0 } else { production.right.len() };
+                    let left_str = production.left.to_string();
+                    snapshots.last_mut().unwrap().action = format!("Reduce by {}", prod_str);
+
+                    let mut children: Vec<ParseTreeNode> = Vec::new();
+                    for _ in 0..rhs_len {
+                        state_stack.pop();
+                        symbol_stack.pop();
+                        if let Some(c) = node_stack.pop() { children.push(c); }
+                    }
+                    children.reverse();
+                    if rhs_len == 0 {
+                        children.push(ParseTreeNode { id: nid, label: "ϵ".to_string(), node_type: "epsilon".to_string(), children: vec![] });
+                        nid += 1;
+                    }
+                    let parent = ParseTreeNode { id: nid, label: left_str.clone(), node_type: "non_terminal".to_string(), children };
+                    nid += 1;
+
+                    let top_state = *state_stack.last().unwrap();
+                    symbol_stack.push(left_str.clone());
+                    node_stack.push(parent);
+
+                    if let Some(&goto_state) = self.goto_table.get(&(top_state, left_str.clone())) {
+                        state_stack.push(goto_state);
+                    } else {
+                        return Err(format!("Error: No GOTO entry for state {} with '{}'", top_state, left_str));
+                    }
+                }
+                Some(LR0Action::Accept) => {
+                    snapshots.last_mut().unwrap().action = "Accept! ✓".to_string();
+                    break;
+                }
+                None => {
+                    let msg = format!("Syntax Error: No action for state {} on input '{}'", current_state, current_input);
+                    snapshots.last_mut().unwrap().action = msg.clone();
+                    return Err(msg);
+                }
+            }
+            step += 1;
+            if step > 1000 { return Err("Error: Maximum steps exceeded (possible infinite loop)".to_string()); }
+        }
+
+        let root = node_stack.into_iter().last()
+            .unwrap_or(ParseTreeNode { id: 0, label: "?".to_string(), node_type: "non_terminal".to_string(), children: vec![] });
+        Ok((snapshots, root))
+    }
+
     pub fn get_all_terminals(&self) -> Vec<String> {
         let mut terminals: Vec<String> = self
             .augmented_grammar
