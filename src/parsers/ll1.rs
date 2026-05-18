@@ -165,6 +165,114 @@ impl LL1Parser {
     }
 }
 
+impl LL1Parser {
+    pub fn parse_with_tree(&self, input: Vec<String>) -> Result<(Vec<ParseSnapshot>, crate::core::models::ParseTreeNode), String> {
+        use crate::core::models::ParseTreeNode;
+
+        struct Arena {
+            labels: Vec<String>,
+            types: Vec<String>,
+            children: Vec<Vec<usize>>,
+        }
+        impl Arena {
+            fn new() -> Self { Arena { labels: vec![], types: vec![], children: vec![] } }
+            fn add(&mut self, label: String, ty: &str) -> usize {
+                let id = self.labels.len();
+                self.labels.push(label);
+                self.types.push(ty.to_string());
+                self.children.push(vec![]);
+                id
+            }
+            fn link(&mut self, parent: usize, child: usize) {
+                self.children[parent].push(child);
+            }
+            fn build(&self, id: usize) -> ParseTreeNode {
+                ParseTreeNode {
+                    id,
+                    label: self.labels[id].clone(),
+                    node_type: self.types[id].clone(),
+                    children: self.children[id].iter().map(|&c| self.build(c)).collect(),
+                }
+            }
+        }
+
+        let mut arena = Arena::new();
+        let root_ty = "non_terminal";
+        let root_id = arena.add(self.grammar.start_symbol.to_string(), root_ty);
+
+        // Stack entries: (Symbol, node_id in arena)
+        let dollar_id = arena.add("$".to_string(), "terminal");
+        let mut stack: Vec<(Symbol, usize)> = vec![
+            (Symbol::Terminal("$".to_string()), dollar_id),
+            (self.grammar.start_symbol.clone(), root_id),
+        ];
+
+        let mut snapshots = Vec::new();
+        let mut input = input;
+        input.push("$".to_string());
+        let mut input_ptr = 0;
+        let mut step = 0;
+
+        while !stack.is_empty() {
+            let (top_sym, top_node_id) = stack.last().unwrap().clone();
+            let current_input = input[input_ptr].clone();
+            let current_sym = Symbol::Terminal(current_input.clone());
+
+            snapshots.push(ParseSnapshot {
+                step,
+                stack: stack.iter().map(|(s, _)| s.clone()).collect(),
+                input_remaining: input[input_ptr..].to_vec(),
+                action: format!("Analyzing top: {}, input: {}", top_sym, current_input),
+            });
+
+            if top_sym == current_sym {
+                if top_sym == Symbol::Terminal("$".to_string()) {
+                    snapshots.last_mut().unwrap().action = "Success!".to_string();
+                    break;
+                }
+                stack.pop();
+                input_ptr += 1;
+                step += 1;
+                snapshots.last_mut().unwrap().action = format!("Match terminal: {}", current_input);
+            } else if let Symbol::NonTerminal(_) = &top_sym {
+                if let Some(rhs) = self.table.get(&(top_sym.clone(), current_sym.clone())) {
+                    stack.pop();
+                    let mut action_desc = format!("{} ->", top_sym);
+
+                    if rhs.is_empty() || rhs[0] == Symbol::Epsilon {
+                        action_desc.push_str(" ϵ");
+                        let eps_id = arena.add("ϵ".to_string(), "epsilon");
+                        arena.link(top_node_id, eps_id);
+                    } else {
+                        let mut child_entries: Vec<(Symbol, usize)> = Vec::new();
+                        for s in rhs.iter() {
+                            if s != &Symbol::Epsilon {
+                                let ty = if matches!(s, Symbol::NonTerminal(_)) { "non_terminal" } else { "terminal" };
+                                let cid = arena.add(s.to_string(), ty);
+                                arena.link(top_node_id, cid);
+                                child_entries.push((s.clone(), cid));
+                                action_desc.push_str(&format!(" {}", s));
+                            }
+                        }
+                        for entry in child_entries.into_iter().rev() {
+                            stack.push(entry);
+                        }
+                    }
+
+                    snapshots.last_mut().unwrap().action = action_desc;
+                    step += 1;
+                } else {
+                    return Err(format!("Syntax Error: No rule for [{}, {}]", top_sym, current_input));
+                }
+            } else {
+                return Err(format!("Syntax Error: Unexpected terminal {}", current_input));
+            }
+        }
+
+        Ok((snapshots, arena.build(root_id)))
+    }
+}
+
 impl Parser for LL1Parser {
     fn parse(&self, mut input: Vec<String>) -> Result<Vec<ParseSnapshot>, String> {
         let mut snapshots = Vec::new();

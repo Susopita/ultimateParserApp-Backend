@@ -30,7 +30,7 @@ pub async fn analyze_grammar(Json(payload): Json<AnalyzeRequest>) -> impl IntoRe
     match Grammar::from_string(&payload.raw_grammar) {
         Ok(grammar) => {
             let is_recursive = grammar.is_left_recursive();
-            
+
             (StatusCode::OK, Json(AnalyzeResponse {
                 status: "success".to_string(),
                 has_left_recursion: Some(is_recursive),
@@ -67,6 +67,14 @@ pub struct ParseResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parsing_table: Option<std::collections::HashMap<String, std::collections::HashMap<String, String>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub parse_tree: Option<crate::core::models::ParseTreeNode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ast: Option<crate::core::models::ParseTreeNode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parse_tree_dot: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ast_dot: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
 
@@ -75,7 +83,7 @@ fn tokenize_input(input: &str, grammar: &crate::core::models::Grammar) -> Vec<St
     if input.contains(' ') {
         return input.split_whitespace().map(|s| s.to_string()).collect();
     }
-    
+
     // Collect unique terminals from the grammar
     let mut terminals: Vec<String> = Vec::new();
     for prod in &grammar.productions {
@@ -87,13 +95,13 @@ fn tokenize_input(input: &str, grammar: &crate::core::models::Grammar) -> Vec<St
             }
         }
     }
-    
+
     // Sort terminals by length descending (longest prefix match)
     terminals.sort_by(|a, b| b.len().cmp(&a.len()));
-    
+
     let mut tokens = Vec::new();
     let mut remaining = input;
-    
+
     while !remaining.is_empty() {
         let mut matched = false;
         for t in &terminals {
@@ -104,7 +112,7 @@ fn tokenize_input(input: &str, grammar: &crate::core::models::Grammar) -> Vec<St
                 break;
             }
         }
-        
+
         if !matched {
             // If no terminal matches, just consume one character (fallback)
             let c = remaining.chars().next().unwrap();
@@ -112,7 +120,7 @@ fn tokenize_input(input: &str, grammar: &crate::core::models::Grammar) -> Vec<St
             remaining = &remaining[c.len_utf8()..];
         }
     }
-    
+
     tokens
 }
 
@@ -124,6 +132,10 @@ pub async fn parse_rd(Json(payload): Json<ParseRequest>) -> impl IntoResponse {
             status: "error".to_string(),
             snapshots: None,
             parsing_table: None,
+            parse_tree: None,
+            ast: None,
+            parse_tree_dot: None,
+            ast_dot: None,
             message: Some(format!("Grammar Error: {}", e)),
         })),
     };
@@ -134,23 +146,40 @@ pub async fn parse_rd(Json(payload): Json<ParseRequest>) -> impl IntoResponse {
             status: "error".to_string(),
             snapshots: None,
             parsing_table: None,
+            parse_tree: None,
+            ast: None,
+            parse_tree_dot: None,
+            ast_dot: None,
             message: Some(format!("Parser Error: {}", e)),
         })),
     };
 
     let tokens = tokenize_input(&payload.input_string, &grammar);
 
-    match parser.parse_input(tokens) {
-        Ok(snapshots) => (StatusCode::OK, Json(ParseResponse {
-            status: "success".to_string(),
-            snapshots: Some(snapshots),
-            parsing_table: None,
-            message: None,
-        })),
+    match parser.parse_input_with_tree(tokens) {
+        Ok((snapshots, parse_tree)) => {
+            let ast = parse_tree.to_ast();
+            let parse_tree_dot = parse_tree.to_dot("parse_tree");
+            let ast_dot = ast.to_dot("ast");
+            (StatusCode::OK, Json(ParseResponse {
+                status: "success".to_string(),
+                snapshots: Some(snapshots),
+                parsing_table: None,
+                parse_tree: Some(parse_tree),
+                ast: Some(ast),
+                parse_tree_dot: Some(parse_tree_dot),
+                ast_dot: Some(ast_dot),
+                message: None,
+            }))
+        },
         Err(e) => (StatusCode::OK, Json(ParseResponse {
             status: "error".to_string(),
             snapshots: None,
             parsing_table: None,
+            parse_tree: None,
+            ast: None,
+            parse_tree_dot: None,
+            ast_dot: None,
             message: Some(e),
         })),
     }
@@ -164,6 +193,10 @@ pub async fn parse_ll1(Json(payload): Json<ParseRequest>) -> impl IntoResponse {
             status: "error".to_string(),
             snapshots: None,
             parsing_table: None,
+            parse_tree: None,
+            ast: None,
+            parse_tree_dot: None,
+            ast_dot: None,
             message: Some(format!("Grammar Error: {}", e)),
         })),
     };
@@ -174,31 +207,41 @@ pub async fn parse_ll1(Json(payload): Json<ParseRequest>) -> impl IntoResponse {
             status: "error".to_string(),
             snapshots: None,
             parsing_table: None,
+            parse_tree: None,
+            ast: None,
+            parse_tree_dot: None,
+            ast_dot: None,
             message: Some(format!("LL(1) Table Error: {}", e)),
         })),
     };
 
     let tokens = tokenize_input(&payload.input_string, &grammar);
 
-    match crate::parsers::Parser::parse(&parser, tokens) {
-        Ok(snapshots) => {
-            // Convert internal table to a serializable format
-            let mut serializable_table = std::collections::HashMap::new();
-            for ((nt, t), rhs) in &parser.table {
-                let nt_str = nt.to_string();
-                let t_str = t.to_string();
-                let rhs_str = rhs.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(" ");
-                
-                serializable_table
-                    .entry(nt_str)
-                    .or_insert_with(std::collections::HashMap::new)
-                    .insert(t_str, rhs_str);
-            }
+    // Build serializable LL(1) table (needed for both success and error paths)
+    let mut serializable_table = std::collections::HashMap::new();
+    for ((nt, t), rhs) in &parser.table {
+        let nt_str = nt.to_string();
+        let t_str = t.to_string();
+        let rhs_str = rhs.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(" ");
+        serializable_table
+            .entry(nt_str)
+            .or_insert_with(std::collections::HashMap::new)
+            .insert(t_str, rhs_str);
+    }
 
+    match parser.parse_with_tree(tokens) {
+        Ok((snapshots, parse_tree)) => {
+            let ast = parse_tree.to_ast();
+            let parse_tree_dot = parse_tree.to_dot("parse_tree");
+            let ast_dot = ast.to_dot("ast");
             (StatusCode::OK, Json(ParseResponse {
                 status: "success".to_string(),
                 snapshots: Some(snapshots),
                 parsing_table: Some(serializable_table),
+                parse_tree: Some(parse_tree),
+                ast: Some(ast),
+                parse_tree_dot: Some(parse_tree_dot),
+                ast_dot: Some(ast_dot),
                 message: None,
             }))
         },
@@ -206,7 +249,11 @@ pub async fn parse_ll1(Json(payload): Json<ParseRequest>) -> impl IntoResponse {
             (StatusCode::OK, Json(ParseResponse {
                 status: "error".to_string(),
                 snapshots: None,
-                parsing_table: None,
+                parsing_table: Some(serializable_table),
+                parse_tree: None,
+                ast: None,
+                parse_tree_dot: None,
+                ast_dot: None,
                 message: Some(e),
             }))
         }
@@ -250,6 +297,14 @@ pub struct LR0ParseResponse {
     pub non_terminals: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshots: Option<Vec<crate::core::models::LR0ParseSnapshot>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parse_tree: Option<crate::core::models::ParseTreeNode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ast: Option<crate::core::models::ParseTreeNode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parse_tree_dot: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ast_dot: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
@@ -309,6 +364,10 @@ pub async fn parse_lr0(Json(payload): Json<ParseRequest>) -> impl IntoResponse {
             terminals: None,
             non_terminals: None,
             snapshots: None,
+            parse_tree: None,
+            ast: None,
+            parse_tree_dot: None,
+            ast_dot: None,
             message: Some(format!("Grammar Error: {}", e)),
         })),
     };
@@ -323,6 +382,10 @@ pub async fn parse_lr0(Json(payload): Json<ParseRequest>) -> impl IntoResponse {
             terminals: None,
             non_terminals: None,
             snapshots: None,
+            parse_tree: None,
+            ast: None,
+            parse_tree_dot: None,
+            ast_dot: None,
             message: Some(format!("LR(0) Table Error: {}", e)),
         })),
     };
@@ -335,17 +398,26 @@ pub async fn parse_lr0(Json(payload): Json<ParseRequest>) -> impl IntoResponse {
     let action_map = serialize_action_table(&parser.action_table, |a| a.to_display_string());
     let goto_map = serialize_goto_table(&parser.goto_table);
     let tokens = tokenize_input(&payload.input_string, &grammar);
+    let all_terminals = parser.get_all_terminals();
+    let all_non_terminals = parser.get_all_non_terminals();
 
-    match parser.parse_input(tokens) {
-        Ok(snapshots) => {
+    match parser.parse_input_with_tree(tokens) {
+        Ok((snapshots, parse_tree)) => {
+            let ast = parse_tree.to_ast();
+            let parse_tree_dot = parse_tree.to_dot("parse_tree");
+            let ast_dot = ast.to_dot("ast");
             (StatusCode::OK, Json(LR0ParseResponse {
                 status: "success".to_string(),
                 automaton: Some(automaton),
                 action_table: Some(action_map),
                 goto_table: Some(goto_map),
-                terminals: Some(parser.get_all_terminals()),
-                non_terminals: Some(parser.get_all_non_terminals()),
+                terminals: Some(all_terminals),
+                non_terminals: Some(all_non_terminals),
                 snapshots: Some(snapshots),
+                parse_tree: Some(parse_tree),
+                ast: Some(ast),
+                parse_tree_dot: Some(parse_tree_dot),
+                ast_dot: Some(ast_dot),
                 message: None,
             }))
         }
@@ -355,9 +427,13 @@ pub async fn parse_lr0(Json(payload): Json<ParseRequest>) -> impl IntoResponse {
                 automaton: Some(automaton),
                 action_table: Some(action_map),
                 goto_table: Some(goto_map),
-                terminals: Some(parser.get_all_terminals()),
-                non_terminals: Some(parser.get_all_non_terminals()),
+                terminals: Some(all_terminals),
+                non_terminals: Some(all_non_terminals),
                 snapshots: None,
+                parse_tree: None,
+                ast: None,
+                parse_tree_dot: None,
+                ast_dot: None,
                 message: Some(e),
             }))
         }
@@ -376,6 +452,10 @@ pub async fn parse_lr1(Json(payload): Json<ParseRequest>) -> impl IntoResponse {
             terminals: None,
             non_terminals: None,
             snapshots: None,
+            parse_tree: None,
+            ast: None,
+            parse_tree_dot: None,
+            ast_dot: None,
             message: Some(format!("Grammar Error: {}", e)),
         })),
     };
@@ -390,6 +470,10 @@ pub async fn parse_lr1(Json(payload): Json<ParseRequest>) -> impl IntoResponse {
             terminals: None,
             non_terminals: None,
             snapshots: None,
+            parse_tree: None,
+            ast: None,
+            parse_tree_dot: None,
+            ast_dot: None,
             message: Some(format!("LR(1) Table Error: {}", e)),
         })),
     };
@@ -402,17 +486,26 @@ pub async fn parse_lr1(Json(payload): Json<ParseRequest>) -> impl IntoResponse {
     let action_map = serialize_action_table(&parser.action_table, |a| a.to_display_string());
     let goto_map = serialize_goto_table(&parser.goto_table);
     let tokens = tokenize_input(&payload.input_string, &grammar);
+    let all_terminals = parser.get_all_terminals();
+    let all_non_terminals = parser.get_all_non_terminals();
 
-    match parser.parse_input(tokens) {
-        Ok(snapshots) => {
+    match parser.parse_input_with_tree(tokens) {
+        Ok((snapshots, parse_tree)) => {
+            let ast = parse_tree.to_ast();
+            let parse_tree_dot = parse_tree.to_dot("parse_tree");
+            let ast_dot = ast.to_dot("ast");
             (StatusCode::OK, Json(LR1ParseResponse {
                 status: "success".to_string(),
                 automaton: Some(automaton),
                 action_table: Some(action_map),
                 goto_table: Some(goto_map),
-                terminals: Some(parser.get_all_terminals()),
-                non_terminals: Some(parser.get_all_non_terminals()),
+                terminals: Some(all_terminals),
+                non_terminals: Some(all_non_terminals),
                 snapshots: Some(snapshots),
+                parse_tree: Some(parse_tree),
+                ast: Some(ast),
+                parse_tree_dot: Some(parse_tree_dot),
+                ast_dot: Some(ast_dot),
                 message: None,
             }))
         }
@@ -422,9 +515,13 @@ pub async fn parse_lr1(Json(payload): Json<ParseRequest>) -> impl IntoResponse {
                 automaton: Some(automaton),
                 action_table: Some(action_map),
                 goto_table: Some(goto_map),
-                terminals: Some(parser.get_all_terminals()),
-                non_terminals: Some(parser.get_all_non_terminals()),
+                terminals: Some(all_terminals),
+                non_terminals: Some(all_non_terminals),
                 snapshots: None,
+                parse_tree: None,
+                ast: None,
+                parse_tree_dot: None,
+                ast_dot: None,
                 message: Some(e),
             }))
         }
@@ -443,6 +540,10 @@ pub async fn parse_lalr1(Json(payload): Json<ParseRequest>) -> impl IntoResponse
             terminals: None,
             non_terminals: None,
             snapshots: None,
+            parse_tree: None,
+            ast: None,
+            parse_tree_dot: None,
+            ast_dot: None,
             message: Some(format!("Grammar Error: {}", e)),
         })),
     };
@@ -457,6 +558,10 @@ pub async fn parse_lalr1(Json(payload): Json<ParseRequest>) -> impl IntoResponse
             terminals: None,
             non_terminals: None,
             snapshots: None,
+            parse_tree: None,
+            ast: None,
+            parse_tree_dot: None,
+            ast_dot: None,
             message: Some(format!("LALR(1) Table Error: {}", e)),
         })),
     };
@@ -469,17 +574,26 @@ pub async fn parse_lalr1(Json(payload): Json<ParseRequest>) -> impl IntoResponse
     let action_map = serialize_action_table(&parser.action_table, |a| a.to_display_string());
     let goto_map = serialize_goto_table(&parser.goto_table);
     let tokens = tokenize_input(&payload.input_string, &grammar);
+    let all_terminals = parser.get_all_terminals();
+    let all_non_terminals = parser.get_all_non_terminals();
 
-    match parser.parse_input(tokens) {
-        Ok(snapshots) => {
+    match parser.parse_input_with_tree(tokens) {
+        Ok((snapshots, parse_tree)) => {
+            let ast = parse_tree.to_ast();
+            let parse_tree_dot = parse_tree.to_dot("parse_tree");
+            let ast_dot = ast.to_dot("ast");
             (StatusCode::OK, Json(LALR1ParseResponse {
                 status: "success".to_string(),
                 automaton: Some(automaton),
                 action_table: Some(action_map),
                 goto_table: Some(goto_map),
-                terminals: Some(parser.get_all_terminals()),
-                non_terminals: Some(parser.get_all_non_terminals()),
+                terminals: Some(all_terminals),
+                non_terminals: Some(all_non_terminals),
                 snapshots: Some(snapshots),
+                parse_tree: Some(parse_tree),
+                ast: Some(ast),
+                parse_tree_dot: Some(parse_tree_dot),
+                ast_dot: Some(ast_dot),
                 message: None,
             }))
         }
@@ -489,9 +603,13 @@ pub async fn parse_lalr1(Json(payload): Json<ParseRequest>) -> impl IntoResponse
                 automaton: Some(automaton),
                 action_table: Some(action_map),
                 goto_table: Some(goto_map),
-                terminals: Some(parser.get_all_terminals()),
-                non_terminals: Some(parser.get_all_non_terminals()),
+                terminals: Some(all_terminals),
+                non_terminals: Some(all_non_terminals),
                 snapshots: None,
+                parse_tree: None,
+                ast: None,
+                parse_tree_dot: None,
+                ast_dot: None,
                 message: Some(e),
             }))
         }
@@ -510,6 +628,10 @@ pub async fn parse_slr1(Json(payload): Json<ParseRequest>) -> impl IntoResponse 
             terminals: None,
             non_terminals: None,
             snapshots: None,
+            parse_tree: None,
+            ast: None,
+            parse_tree_dot: None,
+            ast_dot: None,
             message: Some(format!("Grammar Error: {}", e)),
         })),
     };
@@ -524,6 +646,10 @@ pub async fn parse_slr1(Json(payload): Json<ParseRequest>) -> impl IntoResponse 
             terminals: None,
             non_terminals: None,
             snapshots: None,
+            parse_tree: None,
+            ast: None,
+            parse_tree_dot: None,
+            ast_dot: None,
             message: Some(format!("SLR(1) Table Error: {}", e)),
         })),
     };
@@ -536,17 +662,26 @@ pub async fn parse_slr1(Json(payload): Json<ParseRequest>) -> impl IntoResponse 
     let action_map = serialize_action_table(&parser.action_table, |a| a.to_display_string());
     let goto_map = serialize_goto_table(&parser.goto_table);
     let tokens = tokenize_input(&payload.input_string, &grammar);
+    let all_terminals = parser.get_all_terminals();
+    let all_non_terminals = parser.get_all_non_terminals();
 
-    match parser.parse_input(tokens) {
-        Ok(snapshots) => {
+    match parser.parse_input_with_tree(tokens) {
+        Ok((snapshots, parse_tree)) => {
+            let ast = parse_tree.to_ast();
+            let parse_tree_dot = parse_tree.to_dot("parse_tree");
+            let ast_dot = ast.to_dot("ast");
             (StatusCode::OK, Json(SLR1ParseResponse {
                 status: "success".to_string(),
                 automaton: Some(automaton),
                 action_table: Some(action_map),
                 goto_table: Some(goto_map),
-                terminals: Some(parser.get_all_terminals()),
-                non_terminals: Some(parser.get_all_non_terminals()),
+                terminals: Some(all_terminals),
+                non_terminals: Some(all_non_terminals),
                 snapshots: Some(snapshots),
+                parse_tree: Some(parse_tree),
+                ast: Some(ast),
+                parse_tree_dot: Some(parse_tree_dot),
+                ast_dot: Some(ast_dot),
                 message: None,
             }))
         }
@@ -556,12 +691,15 @@ pub async fn parse_slr1(Json(payload): Json<ParseRequest>) -> impl IntoResponse 
                 automaton: Some(automaton),
                 action_table: Some(action_map),
                 goto_table: Some(goto_map),
-                terminals: Some(parser.get_all_terminals()),
-                non_terminals: Some(parser.get_all_non_terminals()),
+                terminals: Some(all_terminals),
+                non_terminals: Some(all_non_terminals),
                 snapshots: None,
+                parse_tree: None,
+                ast: None,
+                parse_tree_dot: None,
+                ast_dot: None,
                 message: Some(e),
             }))
         }
     }
 }
-
