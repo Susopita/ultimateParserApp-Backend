@@ -8,14 +8,14 @@ impl Grammar {
     pub fn from_string(input: &str) -> Result<Self, String> {
         let mut productions = Vec::new();
         let mut start_symbol = None;
+        let mut non_terminals = std::collections::HashSet::new();
 
+        // First pass: identify all Non-Terminals (left-hand sides)
         for line in input.lines() {
             let line = line.trim();
             if line.is_empty() {
                 continue;
             }
-
-            // Split Left and Right by -> or →
             let parts: Vec<&str> = if line.contains("->") {
                 line.split("->").collect()
             } else if line.contains("→") {
@@ -23,34 +23,50 @@ impl Grammar {
             } else {
                 return Err(format!("Invalid production format: {}", line));
             };
-
             if parts.len() != 2 {
                 return Err(format!("Invalid production format: {}", line));
             }
-
             let left_raw = parts[0].trim();
-            let left_symbol = Self::parse_symbol(left_raw);
+            non_terminals.insert(left_raw.to_string());
+        }
 
-            if !matches!(left_symbol, Symbol::NonTerminal(_)) {
-                return Err(format!("Left side must be a Non-Terminal: {}", left_raw));
+        // Second pass: build productions
+        for line in input.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
             }
 
-            // Set start symbol if not set
+            let parts: Vec<&str> = if line.contains("->") {
+                line.split("->").collect()
+            } else {
+                line.split("→").collect()
+            };
+
+            let left_raw = parts[0].trim();
+            let left_symbol = Symbol::NonTerminal(left_raw.to_string());
+
             if start_symbol.is_none() {
                 start_symbol = Some(left_symbol.clone());
             }
 
-            // Split alternatives by |
             let alternatives: Vec<&str> = parts[1].split('|').collect();
             for alt in alternatives {
                 let alt = alt.trim();
                 let mut right_symbols = Vec::new();
 
-                if alt.is_empty() || alt == "ϵ" || alt == "epsilon" {
+                if alt.is_empty() || alt == "ϵ" || alt == "ε" || alt == "epsilon" {
                     right_symbols.push(Symbol::Epsilon);
                 } else {
                     for word in alt.split_whitespace() {
-                        right_symbols.push(Self::parse_symbol(word));
+                        let sym = if word == "ϵ" || word == "ε" || word == "epsilon" {
+                            Symbol::Epsilon
+                        } else if non_terminals.contains(word) {
+                            Symbol::NonTerminal(word.to_string())
+                        } else {
+                            Symbol::Terminal(word.to_string())
+                        };
+                        right_symbols.push(sym);
                     }
                 }
 
@@ -67,16 +83,6 @@ impl Grammar {
             productions,
             start_symbol,
         })
-    }
-
-    fn parse_symbol(s: &str) -> Symbol {
-        match s {
-            "ϵ" | "ε" | "epsilon" => Symbol::Epsilon,
-            _ if s.chars().next().is_some_and(|c| c.is_uppercase()) => {
-                Symbol::NonTerminal(s.to_string())
-            }
-            _ => Symbol::Terminal(s.to_string()),
-        }
     }
 
     /// Checks if the grammar has any left recursion (direct or indirect).

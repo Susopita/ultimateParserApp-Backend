@@ -25,7 +25,7 @@ impl LL1Parser {
         Ok(parser)
     }
 
-    fn compute_first(&mut self) {
+    pub fn compute_first(&mut self) {
         // Initial First sets for Terminals and Epsilon
         for prod in &self.grammar.productions {
             self.first.entry(Symbol::Epsilon).or_default().insert(Symbol::Epsilon);
@@ -88,7 +88,7 @@ impl LL1Parser {
         result
     }
 
-    fn compute_follow(&mut self) {
+    pub fn compute_follow(&mut self) {
         let start = self.grammar.start_symbol.clone();
         let dollar = Symbol::Terminal("$".to_string());
         

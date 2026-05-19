@@ -8,11 +8,11 @@ mod tests {
 
     #[test]
     fn test_grammar_parsing_simple() {
-        let raw = "S -> A B | a";
+        let raw = "S -> A B | a\nA -> c\nB -> d";
         let grammar = Grammar::from_string(raw).unwrap();
 
         assert_eq!(grammar.start_symbol, Symbol::NonTerminal("S".to_string()));
-        assert_eq!(grammar.productions.len(), 2);
+        assert_eq!(grammar.productions.len(), 4);
         assert_eq!(
             grammar.productions[0].right,
             vec![Symbol::NonTerminal("A".to_string()), Symbol::NonTerminal("B".to_string())]
@@ -97,11 +97,11 @@ mod tests {
     }
 
     #[test]
-    fn test_grammar_terminal_as_lhs_returns_error() {
-        // 'a' starts with lowercase → Terminal → must be rejected as LHS
-        let result = Grammar::from_string("a -> b");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Non-Terminal"));
+    fn test_grammar_lowercase_lhs_is_nonterminal() {
+        let grammar = Grammar::from_string("a -> b").unwrap();
+        assert_eq!(grammar.start_symbol, Symbol::NonTerminal("a".to_string()));
+        assert_eq!(grammar.productions[0].left, Symbol::NonTerminal("a".to_string()));
+        assert_eq!(grammar.productions[0].right, vec![Symbol::Terminal("b".to_string())]);
     }
 
     #[test]

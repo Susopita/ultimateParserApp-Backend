@@ -22,6 +22,10 @@ pub struct AnalyzeResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub productions: Option<Vec<Production>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_sets: Option<std::collections::HashMap<String, Vec<String>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub follow_sets: Option<std::collections::HashMap<String, Vec<String>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
 
@@ -31,12 +35,41 @@ pub async fn analyze_grammar(Json(payload): Json<AnalyzeRequest>) -> impl IntoRe
         Ok(grammar) => {
             let is_recursive = grammar.is_left_recursive();
 
+            let mut parser = crate::parsers::ll1::LL1Parser {
+                grammar: grammar.clone(),
+                first: std::collections::HashMap::new(),
+                follow: std::collections::HashMap::new(),
+                table: std::collections::HashMap::new(),
+            };
+            parser.compute_first();
+            parser.compute_follow();
+
+            let mut first_sets = std::collections::HashMap::new();
+            for (sym, set) in &parser.first {
+                if let Symbol::NonTerminal(_) = sym {
+                    let mut vec: Vec<String> = set.iter().map(|s| s.to_string()).collect();
+                    vec.sort();
+                    first_sets.insert(sym.to_string(), vec);
+                }
+            }
+
+            let mut follow_sets = std::collections::HashMap::new();
+            for (sym, set) in &parser.follow {
+                if let Symbol::NonTerminal(_) = sym {
+                    let mut vec: Vec<String> = set.iter().map(|s| s.to_string()).collect();
+                    vec.sort();
+                    follow_sets.insert(sym.to_string(), vec);
+                }
+            }
+
             (StatusCode::OK, Json(AnalyzeResponse {
                 status: "success".to_string(),
                 has_left_recursion: Some(is_recursive),
                 start_symbol: Some(grammar.start_symbol.clone()),
                 production_count: Some(grammar.productions.len()),
                 productions: Some(grammar.productions),
+                first_sets: Some(first_sets),
+                follow_sets: Some(follow_sets),
                 message: None,
             }))
         },
@@ -47,6 +80,8 @@ pub async fn analyze_grammar(Json(payload): Json<AnalyzeRequest>) -> impl IntoRe
                 start_symbol: None,
                 production_count: None,
                 productions: None,
+                first_sets: None,
+                follow_sets: None,
                 message: Some(e),
             }))
         }
